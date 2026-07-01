@@ -36,11 +36,18 @@ async def generate_financial_brief() -> str:
 
     # We use an AsyncExitStack to safely manage the continuous SSE network stream
     async with AsyncExitStack() as stack:
-        
-        # 1. Connect to your remote Railway MCP Server
-        sse_transport = await stack.enter_async_context(sse_client(mcp_url))
-        session = await stack.enter_async_context(ClientSession(*sse_transport))
-        await session.initialize()
+        # 1. Defensively connect with a timeout
+        print(f"Connecting to MCP Server: {mcp_url}")
+        try:
+            # We add a connection timeout to avoid hanging the Action indefinitely
+            transport = await asyncio.wait_for(
+                stack.enter_async_context(sse_client(mcp_url)), 
+                timeout=15.0
+            )
+            session = await stack.enter_async_context(ClientSession(*transport))
+            await session.initialize()
+        except asyncio.TimeoutError:
+            raise ConnectionError("Railway MCP server took too long to respond.")
         
         # 2. Fetch the tools dynamically from your Railway server
         mcp_tools = await session.list_tools()
@@ -55,6 +62,24 @@ async def generate_financial_brief() -> str:
             }
         } for tool in mcp_tools.tools]
         
+        if response_message.tool_calls:
+            messages.append(response_message)
+            
+            # Use a list to collect results to avoid group-exception interference
+            for tool_call in response_message.tool_calls:
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                    result = await session.call_tool(tool_call.function.name, arguments=args)
+                    
+                    # Ensure the tool message includes the EXACT tool_call_id
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id, 
+                        "content": result.content[0].text
+                    })
+                except Exception as e:
+                    print(f"Tool execution error: {e}")
+
         # 4. Initial request to Groq
         messages = [{"role": "user", "content": prompt}]
         response = await client.chat.completions.create(
