@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import traceback
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -61,13 +62,17 @@ async def generate_financial_brief() -> str:
         } for tool in mcp_tools.tools]
 
         # 4. Initial request to Groq
+        # reasoning_format="hidden" keeps gpt-oss's chain-of-thought out of the
+        # response entirely, so .content always holds the final answer rather
+        # than the model sometimes putting the real output in .reasoning instead.
         messages = [{"role": "user", "content": prompt}]
         response = await client.chat.completions.create(
             model="openai/gpt-oss-120b",
             messages=messages,
             tools=groq_tools,
             tool_choice="auto",
-            temperature=0.2
+            temperature=0.2,
+            reasoning_format="hidden"
         )
         
         response_message = response.choices[0].message
@@ -95,11 +100,31 @@ async def generate_financial_brief() -> str:
             final_response = await client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=messages,
-                temperature=0.2
+                temperature=0.2,
+                reasoning_format="hidden"
             )
-            return final_response.choices[0].message.content
-        
-        return response_message.content
+            final_message = final_response.choices[0].message
+
+            # Defensive fallback: even with reasoning_format="hidden", gpt-oss
+            # models on Groq have occasionally been reported to leave .content
+            # empty while the real answer lands in .reasoning instead. Rather
+            # than silently emailing an empty report, fall back to whichever
+            # field actually has text, and fail loudly if neither does.
+            content = final_message.content or getattr(final_message, "reasoning", None)
+            if not content:
+                raise RuntimeError(
+                    "Groq returned an empty response for the financial brief "
+                    "(both .content and .reasoning were empty)."
+                )
+            return content
+
+        content = response_message.content or getattr(response_message, "reasoning", None)
+        if not content:
+            raise RuntimeError(
+                "Groq returned an empty response for the financial brief "
+                "(both .content and .reasoning were empty)."
+            )
+        return content
 
 def send_email_report(report_content: str) -> None:
     """Delivers the report payload via Gmail SMTP."""
@@ -121,6 +146,28 @@ def send_email_report(report_content: str) -> None:
         server.login(sender_email, app_password)
         server.sendmail(sender_email, receiver_email, msg.as_string())
 
+def _print_full_error(error: BaseException, depth: int = 0) -> None:
+    """
+    Recursively prints every underlying exception and its traceback.
+
+    asyncio/anyio TaskGroups (used internally by the mcp SSE client) wrap
+    real errors in an ExceptionGroup, whose default str() is a useless
+    "unhandled errors in a TaskGroup (N sub-exceptions)". This walks the
+    .exceptions attribute (present on ExceptionGroup/BaseExceptionGroup)
+    to surface what actually went wrong, at every nesting level.
+    """
+    indent = "  " * depth
+    sub_exceptions = getattr(error, "exceptions", None)
+
+    if sub_exceptions:
+        print(f"{indent}{type(error).__name__}: {error} -- unwrapping {len(sub_exceptions)} sub-exception(s):")
+        for sub_error in sub_exceptions:
+            _print_full_error(sub_error, depth + 1)
+    else:
+        print(f"{indent}{type(error).__name__}: {error}")
+        # Full traceback for the innermost, actionable exception.
+        traceback.print_exception(type(error), error, error.__traceback__)
+
 async def main():
     try:
         print("Initializing cloud-native financial data orchestration pipeline...")
@@ -129,7 +176,8 @@ async def main():
         send_email_report(report)
         print("Execution lifecycle complete.")
     except Exception as error:
-        print(f"Pipeline Execution Failure: {error}")
+        print("Pipeline Execution Failure:")
+        _print_full_error(error)
 
 if __name__ == "__main__":
     # Boot up the asynchronous event loop
