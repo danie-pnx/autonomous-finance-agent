@@ -39,10 +39,8 @@ async def generate_financial_brief() -> str:
         # 1. Defensively connect with a timeout
         print(f"Connecting to MCP Server: {mcp_url}")
         try:
-            # We add a connection timeout to avoid hanging the Action indefinitely
-            transport = await asyncio.wait_for(
-                stack.enter_async_context(sse_client(mcp_url)), 
-                timeout=15.0
+            transport = await stack.enter_async_context(
+                sse_client(mcp_url)
             )
             session = await stack.enter_async_context(ClientSession(*transport))
             await session.initialize()
