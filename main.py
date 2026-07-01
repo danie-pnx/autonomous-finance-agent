@@ -59,24 +59,6 @@ async def generate_financial_brief() -> str:
                 "parameters": tool.inputSchema
             }
         } for tool in mcp_tools.tools]
-        
-        if response_message.tool_calls:
-            messages.append(response_message)
-            
-            # Use a list to collect results to avoid group-exception interference
-            for tool_call in response_message.tool_calls:
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                    result = await session.call_tool(tool_call.function.name, arguments=args)
-                    
-                    # Ensure the tool message includes the EXACT tool_call_id
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id, 
-                        "content": result.content[0].text
-                    })
-                except Exception as e:
-                    print(f"Tool execution error: {e}")
 
         # 4. Initial request to Groq
         messages = [{"role": "user", "content": prompt}]
