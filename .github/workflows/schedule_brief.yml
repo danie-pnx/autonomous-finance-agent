@@ -5,7 +5,7 @@ on:
   schedule:
     # Runs at 23:00 UTC (06:00 AM local time) Sunday through Thursday nights, 
     # delivering your brief Monday through Friday mornings.
-    - cron: '15 13 * * 0-4'
+    - cron: '20 13 * * 0-4'
   
   # 2. The Manual Trigger (Crucial for testing today)
   workflow_dispatch: 
