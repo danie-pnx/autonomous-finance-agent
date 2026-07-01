@@ -8,7 +8,6 @@ from groq import AsyncGroq
 from mcp.client.sse import sse_client
 from mcp.client.session import ClientSession
 from contextlib import AsyncExitStack
-import traceback
 
 async def generate_financial_brief() -> str:
     """
@@ -149,9 +148,8 @@ async def main():
         print("Report compiled successfully. Dispatched to delivery sub-routine...")
         send_email_report(report)
         print("Execution lifecycle complete.")
-    except Exception:
-        traceback.print_exc()
-        raise
+    except Exception as error:
+        print(f"Pipeline Execution Failure: {error}")
 
 if __name__ == "__main__":
     # Boot up the asynchronous event loop
