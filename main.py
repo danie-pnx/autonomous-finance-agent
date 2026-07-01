@@ -93,7 +93,7 @@ async def generate_financial_brief() -> str:
             
             # 6. Final request to Groq to synthesize the data into the brief
             final_response = await client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=messages,
                 temperature=0.2
             )
