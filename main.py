@@ -63,7 +63,7 @@ async def generate_financial_brief() -> str:
         # 4. Initial request to Groq
         messages = [{"role": "user", "content": prompt}]
         response = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=messages,
             tools=groq_tools,
             tool_choice="auto",
