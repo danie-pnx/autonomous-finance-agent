@@ -1,13 +1,18 @@
 import os
+import json
+import asyncio
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from groq import Groq
+from groq import AsyncGroq
+from mcp.client.sse import sse_client
+from mcp.client.session import ClientSession
+from contextlib import AsyncExitStack
 
-def generate_financial_brief() -> str:
+async def generate_financial_brief() -> str:
     """
-    Connects to the Groq API and coordinates tool invocation via the 
-    remote Railway MCP Server using Server-Sent Events (SSE).
+    Acts as an MCP Client bridging Groq's LLM reasoning with the remote 
+    Railway MCP Server via Server-Sent Events (SSE).
     """
     groq_api_key = os.environ.get("GROQ_API_KEY")
     mcp_url = os.environ.get("RAILWAY_MCP_URL")
@@ -15,51 +20,90 @@ def generate_financial_brief() -> str:
     if not groq_api_key or not mcp_url:
         raise ValueError("Missing critical environment variables: GROQ_API_KEY or RAILWAY_MCP_URL")
         
-    client = Groq(api_key=groq_api_key)
+    # Initialize the asynchronous Groq client
+    client = AsyncGroq(api_key=groq_api_key)
     tickers = ["AAPL", "AMD", "TSLA", "NVDA"]
     
     prompt = f"""
     You are an expert Wall Street Financial Analyst. 
-    Use the remote MCP server located at {mcp_url} to fetch the latest market sentiment 
-    and news headlines for the following tickers: {', '.join(tickers)}.
+    Use your tools to fetch the latest market sentiment and news headlines for: {', '.join(tickers)}.
     
-    Analyze the data and compile a clean, professional Morning Briefing Report.
-    Your output must include:
-    1. A structured Markdown table summarizing the general sentiment (Bullish/Bearish/Neutral) for each ticker.
-    2. A short paragraph for each ticker highlighting the most critical, market-moving news headlines from the past 24 hours.
+    Output requirements:
+    1. A Markdown table summarizing general sentiment (Bullish/Bearish/Neutral).
+    2. A short paragraph for each ticker highlighting critical headlines.
     3. High-utility executive bullet points outlining macro risks or catalysts.
     """
 
-    # Call Groq utilizing remote Tool configuration primitives
-    completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        extra_body={
-            "tool_config": {
-                "mcp_servers": [
-                    {
-                        "url": mcp_url,
-                        "type": "sse"
-                    }
-                ]
+    # We use an AsyncExitStack to safely manage the continuous SSE network stream
+    async with AsyncExitStack() as stack:
+        
+        # 1. Connect to your remote Railway MCP Server
+        sse_transport = await stack.enter_async_context(sse_client(mcp_url))
+        session = await stack.enter_async_context(ClientSession(*sse_transport))
+        await session.initialize()
+        
+        # 2. Fetch the tools dynamically from your Railway server
+        mcp_tools = await session.list_tools()
+        
+        # 3. Translate MCP tool schema into Groq's expected JSON format
+        groq_tools = [{
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.inputSchema
             }
-        }
-    )
-    
-    return completion.choices[0].message.content
+        } for tool in mcp_tools.tools]
+        
+        # 4. Initial request to Groq
+        messages = [{"role": "user", "content": prompt}]
+        response = await client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            tools=groq_tools,
+            tool_choice="auto",
+            temperature=0.2
+        )
+        
+        response_message = response.choices[0].message
+        
+        # 5. Execute tools if Groq decides to use them
+        if response_message.tool_calls:
+            messages.append(response_message)
+            
+            for tool_call in response_message.tool_calls:
+                # Extract arguments Groq generated
+                args = json.loads(tool_call.function.arguments)
+                
+                # Execute the tool against the Railway server
+                result = await session.call_tool(tool_call.function.name, arguments=args)
+                
+                # Append the raw Yahoo Finance data back into the conversation history
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": result.content[0].text
+                })
+            
+            # 6. Final request to Groq to synthesize the data into the brief
+            final_response = await client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=messages,
+                temperature=0.2
+            )
+            return final_response.choices[0].message.content
+        
+        return response_message.content
 
 def send_email_report(report_content: str) -> None:
-    """
-    Establishes a secure SSL connection to Gmail SMTP servers to deliver 
-    the generated report payload.
-    """
+    """Delivers the report payload via Gmail SMTP."""
     sender_email = os.environ.get("MEMBER_EMAIL")
     receiver_email = os.environ.get("MEMBER_EMAIL")
     app_password = os.environ.get("GMAIL_APP_PASSWORD")
     
     if not all([sender_email, app_password]):
-        raise ValueError("Missing critical email configuration credentials: MEMBER_EMAIL or GMAIL_APP_PASSWORD")
+        raise ValueError("Missing critical email credentials.")
 
     msg = MIMEMultipart()
     msg['From'] = sender_email
@@ -72,12 +116,16 @@ def send_email_report(report_content: str) -> None:
         server.login(sender_email, app_password)
         server.sendmail(sender_email, receiver_email, msg.as_string())
 
-if __name__ == "__main__":
+async def main():
     try:
         print("Initializing cloud-native financial data orchestration pipeline...")
-        report = generate_financial_brief()
+        report = await generate_financial_brief()
         print("Report compiled successfully. Dispatched to delivery sub-routine...")
         send_email_report(report)
         print("Execution lifecycle complete.")
     except Exception as error:
         print(f"Pipeline Execution Failure: {error}")
+
+if __name__ == "__main__":
+    # Boot up the asynchronous event loop
+    asyncio.run(main())
