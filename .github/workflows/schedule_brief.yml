@@ -1,0 +1,35 @@
+name: Autonomous Schedule Briefing
+
+on:
+  # 1. The Automated Trigger
+  schedule:
+    # Runs at 23:00 UTC (06:00 AM local time) Sunday through Thursday nights, 
+    # delivering your brief Monday through Friday mornings.
+    - cron: '0 12 * * 0-4'
+  
+  # 2. The Manual Trigger (Crucial for testing today)
+  workflow_dispatch: 
+
+jobs:
+  execute-agent:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install Project Dependencies
+        run: pip install -r requirements.txt
+        
+      - name: Run Financial Orchestrator
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          RAILWAY_MCP_URL: ${{ secrets.RAILWAY_MCP_URL }}
+          MEMBER_EMAIL: ${{ secrets.MEMBER_EMAIL }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: python main.py

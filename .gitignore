@@ -1,0 +1,15 @@
+# Python bytecode caching
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local virtual environments
+.venv/
+venv/
+env/
+local.env
+
+# IDE settings
+.idea/
+.vscode/
