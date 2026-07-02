@@ -42,13 +42,12 @@ async def generate_financial_brief() -> str:
     async with AsyncExitStack() as stack:
         print(f"Connecting to MCP Server: {mcp_url}")
         try:
-            # FIX 1: Actually enforce the 15-second timeout
-            transport = await asyncio.wait_for(
-                stack.enter_async_context(sse_client(mcp_url)),
-                timeout=15.0
-            )
-            session = await stack.enter_async_context(ClientSession(*transport))
-            await session.initialize()
+            # FIX: Use asyncio.timeout context manager instead of wait_for
+            # This keeps the context entry and exit inside the exact same asyncio Task.
+            async with asyncio.timeout(15.0):
+                transport = await stack.enter_async_context(sse_client(mcp_url))
+                session = await stack.enter_async_context(ClientSession(*transport))
+                await session.initialize()
         except asyncio.TimeoutError:
             raise ConnectionError("Railway MCP server took too long to respond.")
         
@@ -63,10 +62,8 @@ async def generate_financial_brief() -> str:
             }
         } for tool in mcp_tools.tools]
 
-        # 4. Initial request to Groq
         messages = [{"role": "user", "content": prompt}]
         
-        # Swapped to llama-3.3-70b-versatile to clear the 8,000 TPM limit ceiling
         response = await client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
@@ -77,7 +74,6 @@ async def generate_financial_brief() -> str:
         
         response_message = response.choices[0].message
         
-        # 5. Execute tools if Groq decides to use them
         if response_message.tool_calls:
             messages.append(response_message)
             
@@ -95,7 +91,6 @@ async def generate_financial_brief() -> str:
                 except Exception as e:
                     print(f"Tool execution error for {tool_call.function.name}: {e}")
             
-            # Final synthesis request using the versatile model
             final_response = await client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=messages,
