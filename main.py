@@ -131,7 +131,7 @@ def send_email_report(report_content: str) -> None:
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = receiver_email
-    msg['Subject'] = "📈 Your Automated Morning Stock Briefing"
+    msg['Subject'] = "The Automated Morning Stock Briefing"
     
     msg.attach(MIMEText(report_content, 'plain'))
     
