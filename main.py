@@ -32,7 +32,10 @@ async def generate_financial_brief() -> str:
     1. You must ONLY use the exact information returned by your tool calls. 
     2. DO NOT use your pre-trained memory, outside knowledge, or make assumptions. (e.g., Do not mention unlisted companies or historical trends not explicitly stated in the tool results).
     3. If the tool data does not contain enough information to formulate a macro risk or catalyst, you must output: "Insufficient data provided for macro analysis." Do not invent one.
-
+    4. You may ONLY refer to these companies/tickers: AAPL, Apple, AMD, Advanced Micro Devices, TSLA, Tesla, NVDA, Nvidia. If a tool result mentions any other company (e.g. SpaceX, BYD, Intel, Micron), you may reference it only as background context for the ticker's own headline — never as a direct performance comparison or ownership claim.
+    5. Every claim must be traceable to a specific tool result. If you cannot point to which tool output supports a sentence, delete the sentence.
+    6. If a ticker's tool data is mostly topic tags rather than substantive headlines, say so directly (e.g. "Limited headline data for AAPL today") rather than restating vague context in full sentences.
+    
     Output requirements:
     1. A Markdown table summarizing general sentiment (Bullish/Bearish/Neutral).
     2. A short paragraph for each ticker highlighting critical headlines.
