@@ -28,10 +28,15 @@ async def generate_financial_brief() -> str:
     You are an expert Wall Street Financial Analyst. 
     Use your tools to fetch the latest market sentiment and news headlines for: {', '.join(tickers)}.
     
+    CRITICAL GROUNDING RULES:
+    1. You must ONLY use the exact information returned by your tool calls. 
+    2. DO NOT use your pre-trained memory, outside knowledge, or make assumptions. (e.g., Do not mention unlisted companies or historical trends not explicitly stated in the tool results).
+    3. If the tool data does not contain enough information to formulate a macro risk or catalyst, you must output: "Insufficient data provided for macro analysis." Do not invent one.
+    
     Output requirements:
-    1. A Markdown table summarizing general sentiment (Bullish/Bearish/Neutral).
-    2. A short paragraph for each ticker highlighting critical headlines.
-    3. High-utility executive bullet points outlining macro risks or catalysts.
+    1. A Markdown table summarizing general sentiment (Bullish/Bearish/Neutral) based strictly on the fetched headlines.
+    2. A short paragraph for each ticker highlighting critical headlines from the tool output.
+    3. High-utility executive bullet points outlining macro risks or catalysts found ONLY in the provided news.
     """
 
     async with AsyncExitStack() as stack:
@@ -58,23 +63,21 @@ async def generate_financial_brief() -> str:
             }
         } for tool in mcp_tools.tools]
 
+        # 4. Initial request to Groq
         messages = [{"role": "user", "content": prompt}]
         
-        # FIX 2: Implement the gpt-oss-120b specific parameters
+        # Swapped to llama-3.3-70b-versatile to clear the 8,000 TPM limit ceiling
         response = await client.chat.completions.create(
-            model="openai/gpt-oss-120b",
+            model="llama-3.3-70b-versatile",
             messages=messages,
             tools=groq_tools,
             tool_choice="auto",
-            temperature=1,
-            top_p=1,
-            max_completion_tokens=8192,
-            reasoning_effort="medium",
-            reasoning_format="hidden" 
+            temperature=0.2
         )
         
         response_message = response.choices[0].message
         
+        # 5. Execute tools if Groq decides to use them
         if response_message.tool_calls:
             messages.append(response_message)
             
@@ -92,24 +95,20 @@ async def generate_financial_brief() -> str:
                 except Exception as e:
                     print(f"Tool execution error for {tool_call.function.name}: {e}")
             
-            # Final synthesis request using the new model settings
+            # Final synthesis request using the versatile model
             final_response = await client.chat.completions.create(
-                model="openai/gpt-oss-120b",
+                model="llama-3.3-70b-versatile",
                 messages=messages,
-                temperature=1,
-                top_p=1,
-                max_completion_tokens=8192,
-                reasoning_effort="medium",
-                reasoning_format="hidden"
+                temperature=0.2
             )
             final_message = final_response.choices[0].message
 
-            content = final_message.content or getattr(final_message, "reasoning", None)
+            content = final_message.content
             if not content:
                 raise RuntimeError("Groq returned an empty response for the financial brief.")
             return content
 
-        content = response_message.content or getattr(response_message, "reasoning", None)
+        content = response_message.content
         if not content:
             raise RuntimeError("Groq returned an empty response for the financial brief.")
         return content
