@@ -21,6 +21,7 @@ async def generate_financial_brief() -> str:
     if not groq_api_key or not mcp_url:
         raise ValueError("Missing critical environment variables: GROQ_API_KEY or RAILWAY_MCP_URL")
         
+    # Initialize the asynchronous Groq client
     client = AsyncGroq(api_key=groq_api_key)
     tickers = ["AAPL", "AMD", "TSLA", "NVDA"]
     
@@ -32,27 +33,30 @@ async def generate_financial_brief() -> str:
     1. You must ONLY use the exact information returned by your tool calls. 
     2. DO NOT use your pre-trained memory, outside knowledge, or make assumptions. (e.g., Do not mention unlisted companies or historical trends not explicitly stated in the tool results).
     3. If the tool data does not contain enough information to formulate a macro risk or catalyst, you must output: "Insufficient data provided for macro analysis." Do not invent one.
-    
+
     Output requirements:
-    1. A Markdown table summarizing general sentiment (Bullish/Bearish/Neutral) based strictly on the fetched headlines.
-    2. A short paragraph for each ticker highlighting critical headlines from the tool output.
-    3. High-utility executive bullet points outlining macro risks or catalysts found ONLY in the provided news.
+    1. A Markdown table summarizing general sentiment (Bullish/Bearish/Neutral).
+    2. A short paragraph for each ticker highlighting critical headlines.
+    3. High-utility executive bullet points outlining macro risks or catalysts.
     """
 
+    # We use an AsyncExitStack to safely manage the continuous SSE network stream
     async with AsyncExitStack() as stack:
+        # 1. Defensively connect with a timeout
         print(f"Connecting to MCP Server: {mcp_url}")
         try:
-            # FIX: Use asyncio.timeout context manager instead of wait_for
-            # This keeps the context entry and exit inside the exact same asyncio Task.
-            async with asyncio.timeout(15.0):
-                transport = await stack.enter_async_context(sse_client(mcp_url))
-                session = await stack.enter_async_context(ClientSession(*transport))
-                await session.initialize()
+            transport = await stack.enter_async_context(
+                sse_client(mcp_url)
+            )
+            session = await stack.enter_async_context(ClientSession(*transport))
+            await session.initialize()
         except asyncio.TimeoutError:
             raise ConnectionError("Railway MCP server took too long to respond.")
         
+        # 2. Fetch the tools dynamically from your Railway server
         mcp_tools = await session.list_tools()
         
+        # 3. Translate MCP tool schema into Groq's expected JSON format
         groq_tools = [{
             "type": "function",
             "function": {
@@ -62,8 +66,11 @@ async def generate_financial_brief() -> str:
             }
         } for tool in mcp_tools.tools]
 
+        # 4. Initial request to Groq
+        # reasoning_format="hidden" keeps gpt-oss's chain-of-thought out of the
+        # response entirely, so .content always holds the final answer rather
+        # than the model sometimes putting the real output in .reasoning instead.
         messages = [{"role": "user", "content": prompt}]
-        
         response = await client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
@@ -74,23 +81,26 @@ async def generate_financial_brief() -> str:
         
         response_message = response.choices[0].message
         
+        # 5. Execute tools if Groq decides to use them
         if response_message.tool_calls:
             messages.append(response_message)
             
             for tool_call in response_message.tool_calls:
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                    result = await session.call_tool(tool_call.function.name, arguments=args)
-                    
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_call.function.name,
-                        "content": result.content[0].text
-                    })
-                except Exception as e:
-                    print(f"Tool execution error for {tool_call.function.name}: {e}")
+                # Extract arguments Groq generated
+                args = json.loads(tool_call.function.arguments)
+                
+                # Execute the tool against the Railway server
+                result = await session.call_tool(tool_call.function.name, arguments=args)
+                
+                # Append the raw Yahoo Finance data back into the conversation history
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "content": result.content[0].text
+                })
             
+            # 6. Final request to Groq to synthesize the data into the brief
             final_response = await client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=messages,
@@ -98,17 +108,29 @@ async def generate_financial_brief() -> str:
             )
             final_message = final_response.choices[0].message
 
-            content = final_message.content
+            # Defensive fallback: even with reasoning_format="hidden", gpt-oss
+            # models on Groq have occasionally been reported to leave .content
+            # empty while the real answer lands in .reasoning instead. Rather
+            # than silently emailing an empty report, fall back to whichever
+            # field actually has text, and fail loudly if neither does.
+            content = final_message.content or getattr(final_message, "reasoning", None)
             if not content:
-                raise RuntimeError("Groq returned an empty response for the financial brief.")
+                raise RuntimeError(
+                    "Groq returned an empty response for the financial brief "
+                    "(both .content and .reasoning were empty)."
+                )
             return content
 
-        content = response_message.content
+        content = response_message.content or getattr(response_message, "reasoning", None)
         if not content:
-            raise RuntimeError("Groq returned an empty response for the financial brief.")
+            raise RuntimeError(
+                "Groq returned an empty response for the financial brief "
+                "(both .content and .reasoning were empty)."
+            )
         return content
 
 def send_email_report(report_content: str) -> None:
+    """Delivers the report payload via Gmail SMTP."""
     sender_email = os.environ.get("MEMBER_EMAIL")
     receiver_email = os.environ.get("MEMBER_EMAIL")
     app_password = os.environ.get("GMAIL_APP_PASSWORD")
@@ -128,6 +150,15 @@ def send_email_report(report_content: str) -> None:
         server.sendmail(sender_email, receiver_email, msg.as_string())
 
 def _print_full_error(error: BaseException, depth: int = 0) -> None:
+    """
+    Recursively prints every underlying exception and its traceback.
+
+    asyncio/anyio TaskGroups (used internally by the mcp SSE client) wrap
+    real errors in an ExceptionGroup, whose default str() is a useless
+    "unhandled errors in a TaskGroup (N sub-exceptions)". This walks the
+    .exceptions attribute (present on ExceptionGroup/BaseExceptionGroup)
+    to surface what actually went wrong, at every nesting level.
+    """
     indent = "  " * depth
     sub_exceptions = getattr(error, "exceptions", None)
 
@@ -137,6 +168,7 @@ def _print_full_error(error: BaseException, depth: int = 0) -> None:
             _print_full_error(sub_error, depth + 1)
     else:
         print(f"{indent}{type(error).__name__}: {error}")
+        # Full traceback for the innermost, actionable exception.
         traceback.print_exception(type(error), error, error.__traceback__)
 
 async def main():
@@ -151,4 +183,5 @@ async def main():
         _print_full_error(error)
 
 if __name__ == "__main__":
+    # Boot up the asynchronous event loop
     asyncio.run(main())
