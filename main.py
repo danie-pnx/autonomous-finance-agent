@@ -7,7 +7,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from groq import AsyncGroq
 from mcp.client.sse import sse_client
-from mcp.client.session import ClientSession
+from mcp import ClientSession  # FIXED: Correct SDK import path
 from contextlib import AsyncExitStack
 
 async def generate_financial_brief() -> str:
@@ -21,7 +21,6 @@ async def generate_financial_brief() -> str:
     if not groq_api_key or not mcp_url:
         raise ValueError("Missing critical environment variables: GROQ_API_KEY or RAILWAY_MCP_URL")
         
-    # Initialize the asynchronous Groq client
     client = AsyncGroq(api_key=groq_api_key)
     tickers = ["AAPL", "AMD", "TSLA", "NVDA"]
     
@@ -40,18 +39,18 @@ async def generate_financial_brief() -> str:
     3. High-utility executive bullet points outlining macro risks or catalysts.
     """
 
-    # We use an AsyncExitStack to safely manage the continuous SSE network stream
     async with AsyncExitStack() as stack:
-        # 1. Defensively connect with a timeout
         print(f"Connecting to MCP Server: {mcp_url}")
+        
+        # FIXED: Wrapped in an actual native asyncio.timeout block 
+        # to ensure it safely stops waiting after 15 seconds.
         try:
-            transport = await stack.enter_async_context(
-                sse_client(mcp_url)
-            )
-            session = await stack.enter_async_context(ClientSession(*transport))
-            await session.initialize()
-        except asyncio.TimeoutError:
-            raise ConnectionError("Railway MCP server took too long to respond.")
+            async with asyncio.timeout(15.0):
+                transport = await stack.enter_async_context(sse_client(mcp_url))
+                session = await stack.enter_async_context(ClientSession(*transport))
+                await session.initialize()
+        except TimeoutError:  # Python 3.11 native timeout raises built-in TimeoutError
+            raise ConnectionError("Railway MCP server took too long to respond (15s timeout reached).")
         
         # 2. Fetch the tools dynamically from your Railway server
         mcp_tools = await session.list_tools()
@@ -67,9 +66,6 @@ async def generate_financial_brief() -> str:
         } for tool in mcp_tools.tools]
 
         # 4. Initial request to Groq
-        # reasoning_format="hidden" keeps gpt-oss's chain-of-thought out of the
-        # response entirely, so .content always holds the final answer rather
-        # than the model sometimes putting the real output in .reasoning instead.
         messages = [{"role": "user", "content": prompt}]
         response = await client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -86,13 +82,9 @@ async def generate_financial_brief() -> str:
             messages.append(response_message)
             
             for tool_call in response_message.tool_calls:
-                # Extract arguments Groq generated
                 args = json.loads(tool_call.function.arguments)
-                
-                # Execute the tool against the Railway server
                 result = await session.call_tool(tool_call.function.name, arguments=args)
                 
-                # Append the raw Yahoo Finance data back into the conversation history
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -108,11 +100,6 @@ async def generate_financial_brief() -> str:
             )
             final_message = final_response.choices[0].message
 
-            # Defensive fallback: even with reasoning_format="hidden", gpt-oss
-            # models on Groq have occasionally been reported to leave .content
-            # empty while the real answer lands in .reasoning instead. Rather
-            # than silently emailing an empty report, fall back to whichever
-            # field actually has text, and fail loudly if neither does.
             content = final_message.content or getattr(final_message, "reasoning", None)
             if not content:
                 raise RuntimeError(
@@ -150,15 +137,7 @@ def send_email_report(report_content: str) -> None:
         server.sendmail(sender_email, receiver_email, msg.as_string())
 
 def _print_full_error(error: BaseException, depth: int = 0) -> None:
-    """
-    Recursively prints every underlying exception and its traceback.
-
-    asyncio/anyio TaskGroups (used internally by the mcp SSE client) wrap
-    real errors in an ExceptionGroup, whose default str() is a useless
-    "unhandled errors in a TaskGroup (N sub-exceptions)". This walks the
-    .exceptions attribute (present on ExceptionGroup/BaseExceptionGroup)
-    to surface what actually went wrong, at every nesting level.
-    """
+    """Recursively prints every underlying exception and its traceback."""
     indent = "  " * depth
     sub_exceptions = getattr(error, "exceptions", None)
 
@@ -168,7 +147,6 @@ def _print_full_error(error: BaseException, depth: int = 0) -> None:
             _print_full_error(sub_error, depth + 1)
     else:
         print(f"{indent}{type(error).__name__}: {error}")
-        # Full traceback for the innermost, actionable exception.
         traceback.print_exception(type(error), error, error.__traceback__)
 
 async def main():
@@ -183,5 +161,4 @@ async def main():
         _print_full_error(error)
 
 if __name__ == "__main__":
-    # Boot up the asynchronous event loop
     asyncio.run(main())
