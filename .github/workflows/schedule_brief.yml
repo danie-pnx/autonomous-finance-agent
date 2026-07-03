@@ -3,7 +3,6 @@ name: Autonomous Schedule Briefing
 on:
   # 1. The Automated Trigger
   schedule:
-    # Runs at 23:00 UTC (06:00 AM local time) Sunday through Thursday nights, 
     # delivering your brief Monday through Friday mornings.
     - cron: '30 7 * * 0-4'
   
@@ -21,7 +20,7 @@ jobs:
       - name: Setup Python Environment
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.14'
           
       - name: Install Project Dependencies
         run: pip install -r requirements.txt

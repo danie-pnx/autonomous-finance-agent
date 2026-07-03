@@ -7,14 +7,11 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from groq import AsyncGroq
 from mcp.client.sse import sse_client
-from mcp import ClientSession  # FIXED: Correct SDK import path
+from mcp import ClientSession
 from contextlib import AsyncExitStack
 
 async def generate_financial_brief() -> str:
-    """
-    Acts as an MCP Client bridging Groq's LLM reasoning with the remote 
-    Railway MCP Server via Server-Sent Events (SSE).
-    """
+    # 1. Initialization and Prompt setup.
     groq_api_key = os.environ.get("GROQ_API_KEY")
     mcp_url = os.environ.get("RAILWAY_MCP_URL")
     
@@ -42,23 +39,21 @@ async def generate_financial_brief() -> str:
     3. High-utility executive bullet points outlining macro risks or catalysts.
     """
 
+    # 2. Connect to MCP server
     async with AsyncExitStack() as stack:
         print(f"Connecting to MCP Server: {mcp_url}")
         
-        # FIXED: Wrapped in an actual native asyncio.timeout block 
-        # to ensure it safely stops waiting after 15 seconds.
         try:
             async with asyncio.timeout(15.0):
                 transport = await stack.enter_async_context(sse_client(mcp_url))
                 session = await stack.enter_async_context(ClientSession(*transport))
                 await session.initialize()
-        except TimeoutError:  # Python 3.11 native timeout raises built-in TimeoutError
+        except TimeoutError:
             raise ConnectionError("Railway MCP server took too long to respond (15s timeout reached).")
-        
-        # 2. Fetch the tools dynamically from your Railway server
+    
+    # 3. Discovery & Mapping Tool
         mcp_tools = await session.list_tools()
         
-        # 3. Translate MCP tool schema into Groq's expected JSON format
         groq_tools = [{
             "type": "function",
             "function": {
@@ -68,7 +63,7 @@ async def generate_financial_brief() -> str:
             }
         } for tool in mcp_tools.tools]
 
-        # 4. Initial request to Groq
+    # 4. Interactive Tool Calling Loop.
         messages = [{"role": "user", "content": prompt}]
         response = await client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -80,7 +75,7 @@ async def generate_financial_brief() -> str:
         
         response_message = response.choices[0].message
         
-        # 5. Execute tools if Groq decides to use them
+        # If the LLM return tool calls
         if response_message.tool_calls:
             messages.append(response_message)
             
@@ -95,14 +90,13 @@ async def generate_financial_brief() -> str:
                     "content": result.content[0].text
                 })
             
-            # 6. Final request to Groq to synthesize the data into the brief
             final_response = await client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=messages,
                 temperature=0.2
             )
             final_message = final_response.choices[0].message
-
+    # 5. Final Brief Retrival
             content = final_message.content or getattr(final_message, "reasoning", None)
             if not content:
                 raise RuntimeError(
@@ -120,7 +114,7 @@ async def generate_financial_brief() -> str:
         return content
 
 def send_email_report(report_content: str) -> None:
-    """Delivers the report payload via Gmail SMTP."""
+    # 1. Intialization
     sender_email = os.environ.get("MEMBER_EMAIL")
     receiver_email = os.environ.get("MEMBER_EMAIL")
     app_password = os.environ.get("GMAIL_APP_PASSWORD")
@@ -128,6 +122,7 @@ def send_email_report(report_content: str) -> None:
     if not all([sender_email, app_password]):
         raise ValueError("Missing critical email credentials.")
 
+    # 2. Create Email
     msg = MIMEMultipart()
     msg['From'] = sender_email
     msg['To'] = receiver_email
@@ -135,12 +130,13 @@ def send_email_report(report_content: str) -> None:
     
     msg.attach(MIMEText(report_content, 'plain'))
     
+    # 3. Send the email via smtp
     with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
         server.login(sender_email, app_password)
         server.sendmail(sender_email, receiver_email, msg.as_string())
 
 def _print_full_error(error: BaseException, depth: int = 0) -> None:
-    """Recursively prints every underlying exception and its traceback."""
+    # Recursively prints every underlying exception and its traceback.
     indent = "  " * depth
     sub_exceptions = getattr(error, "exceptions", None)
 
@@ -163,5 +159,6 @@ async def main():
         print("Pipeline Execution Failure:")
         _print_full_error(error)
 
+# Direct Execution entry point (Imported Execution is "file_name")
 if __name__ == "__main__":
     asyncio.run(main())
